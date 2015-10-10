@@ -20,7 +20,7 @@
          }).
 
 -record(state, {
-          orders = [] :: [#order{}]
+          orders = dict:new() :: dict:dict()
          }).
 
 %%%===================================================================
@@ -68,28 +68,26 @@ assign(OrderID, Messenger) ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call(all_ids, _From, State = #state{orders = OrderList}) ->
-    OrderIDs = lists:map(fun(#order{order_id = ID}) -> ID end, OrderList),
+handle_call(all_ids, _From, State = #state{orders = OrderDict}) ->
+    OrderIDs = lists:sort(dict:fetch_keys(OrderDict)),
     {reply, {ok, OrderIDs}, State};
-handle_call({assign, OrderID, Messenger}, _From, State = #state{orders = OrderList}) ->
-    NewOrderList =
-        case lists:keyfind(OrderID, 2, OrderList) of
-            false ->
-                OrderList;
-            Order ->
-                lists:keyreplace(
-                  OrderID, 2, OrderList,
-                  Order#order {
-                    status = in_progress,
-                    messenger = Messenger
-                   })
+handle_call({assign, OrderID, Messenger}, _From, State = #state{orders = OrderDict}) ->
+    NewOrderDict =
+        try
+            dict:update(OrderID,
+                        fun(Order) -> Order#order{status=in_progress,
+                                                  messenger=Messenger}
+                        end,
+                        OrderDict)
+        catch
+            _:_ -> OrderDict
         end,
-    {reply, ok, State#state{orders = NewOrderList}};
-handle_call({details, OrderID}, _From, State = #state{orders = OrderList}) ->
-    Resp = case lists:keyfind(OrderID, 2, OrderList) of
-               false ->
+    {reply, ok, State#state{orders = NewOrderDict}};
+handle_call({details, OrderID}, _From, State = #state{orders = OrderDict}) ->
+    Resp = case dict:find(OrderID, OrderDict) of
+               error ->
                    {error, unknown_order_id};
-               Order ->
+               {ok, Order} ->
                    {ok,
                     {
                       Order#order.pickup_location,
@@ -99,34 +97,37 @@ handle_call({details, OrderID}, _From, State = #state{orders = OrderList}) ->
                    }
            end,
     {reply, Resp, State};
-handle_call({delivered, OrderID}, _From, State = #state{orders = OrderList}) ->
-    NewOrderList = case lists:keyfind(OrderID, 2, OrderList) of
-                       false ->
-                           OrderList;
-                       Order ->
-                           lists:keyreplace(OrderID, 2, OrderList,
-                                            Order#order{status = completed})
-                   end,
-    {reply, ok, State#state{orders = NewOrderList}};
-handle_call(available, _From, State = #state{orders = OrderList}) ->
-    AvailableOrders = lists:filter(fun
-                                       (#order{status = available}) -> true;
-                                       (_)                          -> false
-                                   end, OrderList),
-    OrderIDS = lists:map(fun(#order{order_id = ID}) -> ID end, AvailableOrders),
+handle_call({delivered, OrderID}, _From, State = #state{orders = OrderDict}) ->
+    NewOrderDict =
+        try
+            dict:update(OrderID,
+                        fun(Order) ->
+                                Order#order{status=completed}
+                        end,
+                        OrderDict)
+        catch
+            _:_ -> OrderDict
+        end,
+    {reply, ok, State#state{orders = NewOrderDict}};
+handle_call(available, _From, State = #state{orders = OrderDict}) ->
+    AvailableOrders = dict:filter(fun
+                                       (_, #order{status = available}) -> true;
+                                       (_, _)                          -> false
+                                   end, OrderDict),
+    OrderIDS = lists:sort(dict:fetch_keys(AvailableOrders)),
     {reply, {ok, OrderIDS}, State};
-handle_call({submit, Order}, _From, State = #state{orders = OrderList}) ->
-    NewOrderList = [Order | OrderList],
-    {reply, ok, State#state{orders = NewOrderList}};
-handle_call({cancel, OrderID}, _From, State = #state{orders = OrderList}) ->
-    NewOrderList = lists:keydelete(OrderID, 2, OrderList),
-    {reply, ok, State#state{orders = NewOrderList}};
-handle_call({status, OrderID}, _From, State = #state{orders = OrderList}) ->
+handle_call({submit, Order}, _From, State = #state{orders = OrderDict}) ->
+    NewOrderDict = dict:store(Order#order.order_id, Order, OrderDict),
+    {reply, ok, State#state{orders = NewOrderDict}};
+handle_call({cancel, OrderID}, _From, State = #state{orders = OrderDict}) ->
+    NewOrderDict = dict:erase(OrderID, OrderDict),
+    {reply, ok, State#state{orders = NewOrderDict}};
+handle_call({status, OrderID}, _From, State = #state{orders = OrderDict}) ->
     %% Note: does not handle concept of being assigned by dispatch to a
     %% messenger
-    Resp = case lists:keyfind(OrderID, 2, OrderList) of
-               false -> {error, unknown_order_id};
-               Order ->
+    Resp = case dict:find(OrderID, OrderDict) of
+               error -> {error, unknown_order_id};
+               {ok, Order} ->
                    case Order#order.status of
                        available ->
                            {ok, waiting_assignment};
